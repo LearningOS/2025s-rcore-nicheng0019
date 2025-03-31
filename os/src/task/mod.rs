@@ -39,12 +39,59 @@ pub struct TaskManager {
     inner: UPSafeCell<TaskManagerInner>,
 }
 
+const MAX_ENTRIES: usize = 128;
+
+// 计数器条目结构：存储键值对
+#[derive(Clone, Copy)]
+struct Entry {
+    key: usize,
+    count: isize,
+}
+
+#[derive(Clone, Copy)]
+// 计数器集合结构
+struct Counter {
+    entries: [Entry; MAX_ENTRIES],
+    len: usize,
+}
+
+impl Counter {
+    /// 对指定 `key` 的 Entry 计数加 1，若不存在则新增条目
+    pub fn set_syscall_count(&mut self, id: usize) {
+        // 遍历已存在的条目，查找匹配的 key
+        for entry in &mut self.entries[0..self.len] {
+            if entry.key == id {
+                entry.count += 1;
+                return;
+            }
+        }
+        // 若未找到且数组未满，新增条目
+        if self.len < MAX_ENTRIES {
+            self.entries[self.len] = Entry { key: id, count: 1 };
+            self.len += 1;
+        }
+    }
+
+    /// 获取指定 `key` 的 Entry 的计数值，未找到返回 0
+    pub fn get_syscall_count(&self, id: usize) -> isize {
+        // 遍历查找匹配的 key
+        for entry in &self.entries[0..self.len] {
+            if entry.key == id {
+                return entry.count;
+            }
+        }
+        0 // 默认返回 0
+    }
+}
+
+
 /// Inner of Task Manager
 pub struct TaskManagerInner {
     /// task list
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    counters: [Counter; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -59,12 +106,17 @@ lazy_static! {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
         }
+        let counters = [Counter {
+            entries: [Entry { key: 0, count: 0 }; MAX_ENTRIES],
+            len: 0,
+        }; MAX_APP_NUM];
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    counters,
                 })
             },
         }
@@ -135,6 +187,18 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn set_syscall_count(&self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.counters[current].set_syscall_count(id);
+    }
+
+    fn get_syscall_count(&self, id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.counters[current].get_syscall_count(id) as isize
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +232,17 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+
+/// set the syscall count of current 'Running' task.
+pub fn set_syscall_count(id: usize) 
+{
+    TASK_MANAGER.set_syscall_count(id);
+}
+
+/// get the syscall count of current 'Running' task.
+pub fn get_syscall_count(id: usize) -> isize 
+{
+    TASK_MANAGER.get_syscall_count(id)
 }

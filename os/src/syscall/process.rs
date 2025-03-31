@@ -1,6 +1,6 @@
 //! Process management syscalls
 use crate::{
-    task::{exit_current_and_run_next, suspend_current_and_run_next},
+    task::{exit_current_and_run_next, suspend_current_and_run_next, get_syscall_count},
     timer::get_time_us,
 };
 
@@ -38,27 +38,6 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-use spin::Mutex;
-const MAX_ENTRIES: usize = 128;
-
-// 计数器条目结构：存储键值对
-#[derive(Clone, Copy)]
-struct Entry {
-    key: usize,
-    count: isize,
-}
-
-// 计数器集合结构
-struct Counter {
-    entries: [Entry; MAX_ENTRIES],
-    len: usize,
-}
-
-
-static COUNTER: Mutex<Counter> = Mutex::new(Counter {
-    entries: [Entry { key: 0, count: 0 }; MAX_ENTRIES],
-    len: 0,
-});
 
 // TODO: implement the syscall
 pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
@@ -71,38 +50,8 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
                 0
             } 
             2 => {
-                let counter = COUNTER.lock();
-                for i in 0..counter.len {
-                    if counter.entries[i].key == _id {
-                        return counter.entries[i].count;
-                    }
-                }
-                0                
-            }
-            3 => {
-                let mut counter = COUNTER.lock();
-                let current_len = counter.len;               
-                
-                // 查找或插入条目
-                for i in 0..counter.len {
-                    if counter.entries[i].key == _id {
-                        counter.entries[i].count += 1;
-                        return counter.entries[i].count;
-                    }
-                }
-              
-                if counter.len < MAX_ENTRIES {
-                    counter.entries[current_len] = Entry {
-                        key: _id,
-                        count: 1,
-                    };
-                    counter.len += 1;
-                    1
-                } else {
-                    0 
-                }
-                
-            }
+                get_syscall_count(_id)             
+            }    
             _ => -1,
         }
     }  
