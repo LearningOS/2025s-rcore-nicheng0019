@@ -1,5 +1,7 @@
 //! Process management syscalls
-use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next};
+use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next, current_user_token};
+use crate::timer::get_time_us;
+use crate::mm::translated_byte_buffer;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -25,9 +27,21 @@ pub fn sys_yield() -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    -1
+    let us = get_time_us();
+    let sec_ptr = ts as *mut usize;
+    let usec_ptr = unsafe { sec_ptr.add(1) };
+
+    for buf in translated_byte_buffer(current_user_token(), sec_ptr as *const u8, 8) {
+        buf.copy_from_slice(&(us / 1_000_000usize).to_ne_bytes());
+    }
+    
+    // 写入微秒字段
+    for buf in translated_byte_buffer(current_user_token(), usec_ptr as *const u8, 8) {
+        buf.copy_from_slice(&(us % 1_000_000usize).to_ne_bytes());
+    }
+    0
 }
 
 /// TODO: Finish sys_trace to pass testcases
