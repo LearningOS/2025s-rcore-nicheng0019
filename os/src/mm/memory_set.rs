@@ -15,6 +15,7 @@ use core::arch::asm;
 use lazy_static::*;
 use riscv::register::satp;
 
+
 extern "C" {
     fn stext();
     fn etext();
@@ -33,10 +34,20 @@ lazy_static! {
     pub static ref KERNEL_SPACE: Arc<UPSafeCell<MemorySet>> =
         Arc::new(unsafe { UPSafeCell::new(MemorySet::new_kernel()) });
 }
+
+
+#[derive(Copy, Clone)]
+pub struct VirtRange {
+    start: VirtAddr,
+    end: VirtAddr,
+    area_index: usize,
+}
+
 /// address space
 pub struct MemorySet {
     page_table: PageTable,
     areas: Vec<MapArea>,
+    virtual_tracker: Vec<VirtRange>
 }
 
 impl MemorySet {
@@ -45,6 +56,7 @@ impl MemorySet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
+            virtual_tracker: Vec::new(),
         }
     }
     /// Get the page table token
@@ -62,13 +74,103 @@ impl MemorySet {
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
         );
+        self.virtual_tracker.push(VirtRange {
+                            start:start_va, 
+                            end: end_va,
+                            area_index: self.areas.len() - 1});
+    }
+    /// Assume that no conflicts.
+    pub fn overlap_with(&self, start: usize, end: usize) -> bool
+    {
+        // 修改地址冲突检查部分
+        let new_start = VirtAddr::from(start);
+        let new_end = VirtAddr::from(end);      
+        
+        for virtual_tracker in &self.virtual_tracker {
+            if !(virtual_tracker.end <= new_start || new_end <= virtual_tracker.start) {
+                return true;
+            }
+        }
+        false
+    }
+    /// Assume that no conflicts.
+    pub fn kernel_check_permission(&self, start: usize, permission: MapPermission) -> bool
+    {
+        let new_start = VirtAddr::from(start).floor();
+        for area in &self.areas {
+            if area.vpn_range.get_start() <= new_start && new_start < area.vpn_range.get_end() {
+                if area.map_perm.contains(permission) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    /// Assume that no conflicts.
+    pub fn check_permission(&self, start: usize, permission: MapPermission) -> bool
+    {
+        let new_start = VirtAddr::from(start).floor();
+        for area in &self.areas {
+            if area.vpn_range.get_start() <= new_start && new_start < area.vpn_range.get_end() {
+                if area.map_perm.contains(permission) {
+                    return true;
+                }
+            }
+        }
+        
+        let new_start = VirtAddr::from(start);   
+        
+        for virtual_tracker in &self.virtual_tracker {
+            if virtual_tracker.end > new_start && new_start >= virtual_tracker.start {
+                if self.areas[virtual_tracker.area_index].map_perm.contains(permission) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Assume that no conflicts.
+    pub fn contain(&self, start: usize, end: usize) -> bool
+    {
+        let new_start = VirtAddr::from(start);
+        let new_end = VirtAddr::from(end);      
+        
+        for virtual_tracker in &self.virtual_tracker {
+            if virtual_tracker.end == new_end && new_start == virtual_tracker.start {
+                return true;
+            }
+        }
+        false
+    }
+    /// Assume that no conflicts.
+    pub fn munmap(&mut self, start: usize, end: usize) -> isize
+    {
+        let new_start = VirtAddr::from(start);
+        let new_end = VirtAddr::from(end);  
+        let mut target_area = None;
+        for i in 0..self.virtual_tracker.len() {
+            if self.virtual_tracker[i].end >= new_end && new_start >= self.virtual_tracker[i].start {
+                target_area = Some(i);
+                break;
+            }
+        }
+
+        if let Some(index) = target_area {
+            let mut area = self.areas.remove(self.virtual_tracker[index].area_index);
+            area.unmap(&mut self.page_table);
+            self.virtual_tracker.remove(index);
+            0
+        } else {
+            -1 // 找不到完全匹配的区域
+        }
     }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data);
         }
-        self.areas.push(map_area);
+        self.areas.push(map_area);       
     }
     /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) {
@@ -409,4 +511,15 @@ pub fn remap_test() {
         .unwrap()
         .executable(),);
     println!("remap_test passed!");
+}
+
+impl MapPermission {
+    /// Convert PTEFlags to MapPermission
+    pub fn from_flags(flags: PTEFlags) -> Self {
+        let mut perm = MapPermission::empty();
+        if flags.contains(PTEFlags::R) { perm |= MapPermission::U; }
+        if flags.contains(PTEFlags::W) { perm |= MapPermission::W; }
+        if flags.contains(PTEFlags::X) { perm |= MapPermission::X; }
+        perm
+    }
 }

@@ -23,6 +23,25 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+use crate::config::PAGE_SIZE;
+use crate::mm::MapPermission;
+use crate::mm::VirtAddr;
+use crate::mm::KERNEL_SPACE;
+const MAX_ENTRIES: usize = 128;
+ 
+ // 计数器条目结构：存储键值对
+ #[derive(Clone, Copy)]
+ struct Entry {
+     key: usize,
+     count: isize,
+ }
+ 
+ #[derive(Clone, Copy)]
+ // 计数器集合结构
+ struct Counter {
+     entries: [Entry; MAX_ENTRIES],
+     len: usize,
+ }
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -38,6 +57,7 @@ pub struct TaskManager {
     num_app: usize,
     /// use inner value to get mutable access
     inner: UPSafeCell<TaskManagerInner>,
+    //counters: UPSafeCell<Vec<Counter>>,
 }
 
 /// The task manager inner in 'UPSafeCell'
@@ -46,7 +66,38 @@ struct TaskManagerInner {
     tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
     current_task: usize,
+    counters: Vec<Counter>,
 }
+
+ 
+ impl Counter {
+     /// 对指定 `key` 的 Entry 计数加 1，若不存在则新增条目
+     pub fn set_syscall_count(&mut self, id: usize) {
+         // 遍历已存在的条目，查找匹配的 key
+         for entry in &mut self.entries[0..self.len] {
+             if entry.key == id {
+                 entry.count += 1;
+                 return;
+             }
+         }
+         // 若未找到且数组未满，新增条目
+         if self.len < MAX_ENTRIES {
+             self.entries[self.len] = Entry { key: id, count: 1 };
+             self.len += 1;
+         }
+     }
+ 
+     /// 获取指定 `key` 的 Entry 的计数值，未找到返回 0
+    pub fn get_syscall_count(&self, id: usize) -> isize {
+         //遍历查找匹配的 key
+        for entry in &self.entries[0..self.len] {
+            if entry.key == id {
+                return entry.count;
+            }
+        }
+        0 // 默认返回 0
+    }
+ }
 
 lazy_static! {
     /// a `TaskManager` global instance through lazy_static!
@@ -55,15 +106,22 @@ lazy_static! {
         let num_app = get_num_app();
         println!("num_app = {}", num_app);
         let mut tasks: Vec<TaskControlBlock> = Vec::new();
+        let mut counters: Vec<Counter> = Vec::new();
         for i in 0..num_app {
             tasks.push(TaskControlBlock::new(get_app_data(i), i));
+            counters.push(Counter {
+                entries: [Entry { key: 0, count: 0 }; MAX_ENTRIES],
+                len: 0,
+            })
         }
+        
         TaskManager {
             num_app,
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    counters
                 })
             },
         }
@@ -153,6 +211,65 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn set_syscall_count(& self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.counters[current].set_syscall_count(id);
+    }
+
+    fn get_syscall_count(&self, id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.counters[current].get_syscall_count(id) as isize
+    }
+
+    fn mmap(&self, start: usize, len: usize, perm: MapPermission) -> isize
+    {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &mut inner.tasks[current].memory_set;
+        let end = (start + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // 页对齐
+        //println!("mmap: start = {:#x}, end = {:#x}", start, end);
+        // 检查与现有区域是否重叠
+        if memory_set.overlap_with(start, end) {
+            return -1;
+        }
+
+        memory_set.insert_framed_area(VirtAddr::from(start), VirtAddr::from(end), perm);
+        0
+    }
+
+    fn check_permission(&self, start: usize, perm: MapPermission) -> bool
+    {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &mut inner.tasks[current].memory_set;
+        if memory_set.check_permission(start, perm) {
+            return true;
+        }
+
+        let kernel_space = KERNEL_SPACE.exclusive_access();
+        if kernel_space.kernel_check_permission(start, perm) {
+            return true;
+        }
+        false
+    }
+
+    fn munmap(&self, start: usize, len: usize) -> isize
+    {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &mut inner.tasks[current].memory_set;
+        let end = (start + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // 页对齐
+
+        if memory_set.contain(start, end) == false {
+            return -1;
+        }
+        //println!("munmap: start = {:#x}, end = {:#x}", start, end);
+        // 查找完全匹配的MapArea
+        memory_set.munmap(start, end)   
+    }
 }
 
 /// Run the first task in task list.
@@ -202,3 +319,33 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
+
+/// set the syscall count of current 'Running' task.
+pub fn set_syscall_count(id: usize) 
+ {
+     TASK_MANAGER.set_syscall_count(id);
+ }
+ 
+ /// get the syscall count of current 'Running' task.
+ pub fn get_syscall_count(id: usize) -> isize 
+ {
+     TASK_MANAGER.get_syscall_count(id)
+ }
+
+  /// get the syscall count of current 'Running' task.
+  pub fn mmap(start: usize, len: usize, perm: MapPermission) -> isize
+  {
+      TASK_MANAGER.mmap(start, len, perm)
+  }
+
+  ///  get the syscall count of current 'Running' task.
+  pub fn munmap(start: usize, len: usize) -> isize
+  {
+      TASK_MANAGER.munmap(start, len)
+  }
+
+  ///  get the syscall count of current 'Running' task.
+  pub fn check_permission(start: usize, perm: MapPermission) -> bool
+  {
+      TASK_MANAGER.check_permission(start, perm)
+  }
