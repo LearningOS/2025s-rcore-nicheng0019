@@ -128,7 +128,7 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-/// YOUR JOB: Implement mmap.
+/// sys_mmap.
 pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap",
@@ -151,7 +151,7 @@ pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     mmap(start, len, perm)
 }
 
-/// YOUR JOB: Implement munmap.
+/// sys_munmap.
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_munmap",
