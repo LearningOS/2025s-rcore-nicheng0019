@@ -4,12 +4,15 @@ use alloc::sync::Arc;
 
 use crate::{
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, translated_byte_buffer, MapPermission},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, mmap, munmap,BIG_STRIDE
     },
+    timer::get_time_us,
+    config::PAGE_SIZE,
 };
+
 
 #[repr(C)]
 #[derive(Debug)]
@@ -54,7 +57,7 @@ pub fn sys_exec(path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
-    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY, true) {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         task.exec(all_data.as_slice());
@@ -105,30 +108,59 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let us = get_time_us();
+    let sec_ptr = ts as *mut usize;
+    let usec_ptr = unsafe { sec_ptr.add(1) };
+
+    for buf in translated_byte_buffer(current_user_token(), sec_ptr as *const u8, 8) {
+        buf.copy_from_slice(&(us / 1_000_000usize).to_le_bytes());
+    }
+    
+    // 写入微秒字段
+    for buf in translated_byte_buffer(current_user_token(), usec_ptr as *const u8, 8) {
+        buf.copy_from_slice(&(us % 1_000_000usize).to_le_bytes());
+    }
+    0
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_mmap",
         current_task().unwrap().pid.0
     );
-    -1
+    // 参数检查
+    if start % PAGE_SIZE != 0 
+        || (prot & !0x7) != 0 
+        || (prot & 0x7) == 0 
+    {
+        return -1;
+    }
+
+    // 转换权限标志
+    let mut perm = MapPermission::U;
+    if (prot & 1) != 0 { perm |= MapPermission::R; }
+    if (prot & 2) != 0 { perm |= MapPermission::W; }
+    if (prot & 4) != 0 { perm |= MapPermission::X; }
+
+    mmap(start, len, perm)
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_munmap",
         current_task().unwrap().pid.0
     );
-    -1
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    munmap(start, len)
 }
 
 /// change data segment size
@@ -141,21 +173,49 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
+
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_spawn",
         current_task().unwrap().pid.0
     );
+    // 获取当前进程的地址空间 token
+    let token = current_user_token();
+    
+    // 转换用户空间指针为 Rust 字符串
+    let path = translated_str(token, path);
+    
+    // 1. 检查应用程序是否存在
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY, true) {
+        let all_data = app_inode.read_all();
+        // 2. 创建新任务（类似 fork 逻辑）
+        let current_task = current_task().unwrap();
+        let new_task = current_task.spawn(all_data.as_slice());  // 需要实现 TaskControlBlock::spawn
+        
+        // 4. 加入调度队列并返回 PID
+        let new_pid = new_task.pid.0;
+        add_task(new_task);
+        return new_pid as isize;
+    };
     -1
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_set_priority",
         current_task().unwrap().pid.0
     );
-    -1
+    if prio <= 1 {
+        return -1; // 优先级必须 >=2
+    }
+    
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.priority = prio as usize;
+    inner.pass = BIG_STRIDE / inner.priority;
+    
+    prio
 }

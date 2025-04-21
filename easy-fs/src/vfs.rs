@@ -12,7 +12,9 @@ pub struct Inode {
     block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
+    inode_id: u32
 }
+
 
 impl Inode {
     /// Create a vfs inode
@@ -21,16 +23,48 @@ impl Inode {
         block_offset: usize,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
+        inode_id: u32,
     ) -> Self {
         Self {
             block_id: block_id as usize,
             block_offset,
             fs,
             block_device,
+            inode_id,
         }
     }
+
+    /// Get the inode id of the current inode
+    pub fn get_inode_id(&self) -> u32 {
+        self.inode_id
+    }
+
+    /// Find inode under a disk inode by name
+    fn find_inode_name(&self, inode_id: u32, disk_inode: &DiskInode) -> Option<String> {
+        // assert it is a directory
+        assert!(disk_inode.is_dir());
+        let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+        let mut dirent = DirEntry::empty();
+        for i in 0..file_count {
+            assert_eq!(
+                disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                DIRENT_SZ,
+            );
+            if dirent.inode_id() == inode_id {
+                return Some(String::from(dirent.name()));
+            }
+        }
+        None
+    }
+    /// Get the inode id of the current inode
+    pub fn get_name_by_id(&self, inode_id: u32) -> Option<String> {
+        let fs = self.fs.lock();
+        self.read_disk_inode(|disk_inode| {
+            self.find_inode_name(inode_id, disk_inode)
+        })
+    }
     /// Call a function over a disk inode to read it
-    fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
+    pub fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .read(self.block_offset, f)
@@ -69,6 +103,7 @@ impl Inode {
                     block_offset,
                     self.fs.clone(),
                     self.block_device.clone(),
+                    inode_id,
                 ))
             })
         })
@@ -135,9 +170,88 @@ impl Inode {
             block_offset,
             self.fs.clone(),
             self.block_device.clone(),
+            new_inode_id,
         )))
         // release efs lock automatically by compiler
     }
+
+    /// Remove a file under current inode by name
+    pub fn remove(&self, name: &str) -> bool {
+        info!("remove");
+        let mut fs = self.fs.lock();
+        let inode_id = match self.read_disk_inode(|disk_inode| {
+            self.find_inode_id(name, disk_inode)
+        }) {
+            Some(id) => id,
+            None => return false,
+        };
+
+        info!("remove2");
+
+        // 获取要删除的inode位置
+        let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+        
+        info!("remove3");
+        // 修改目录项
+        self.modify_disk_inode(|root_inode| {
+            // 读取所有目录项
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut entries = Vec::with_capacity(file_count);
+            
+            // 过滤掉目标条目
+            for i in 0..file_count {
+                let mut dirent = DirEntry::empty();
+                root_inode.read_at(
+                    i * DIRENT_SZ,
+                    dirent.as_bytes_mut(),
+                    &self.block_device
+                );
+                if dirent.name() != name {
+                    entries.push(dirent);
+                }
+            }
+
+            // 计算新的大小并释放多余块
+            let new_size = entries.len() * DIRENT_SZ;
+            if new_size < root_inode.size as usize {
+                let blocks_needed = DiskInode::total_blocks(new_size as u32);
+                let blocks_to_dealloc = DiskInode::total_blocks(root_inode.size) - blocks_needed;
+                if blocks_to_dealloc > 0 {
+                    for i in 0..blocks_to_dealloc {
+                        fs.dealloc_data(root_inode.data_blocks() - 1 - i);
+                    }
+                }
+            }
+
+            // 写回更新后的目录项
+            root_inode.size = new_size as u32;
+            for (i, dirent) in entries.iter().enumerate() {
+                root_inode.write_at(
+                    i * DIRENT_SZ,
+                    dirent.as_bytes(),
+                    &self.block_device
+                );
+            }
+        });
+        
+        info!("remove4");
+        // // 清除目标inode内容
+        // let target_inode = Inode::new(
+        //     block_id as u32,
+        //     block_offset,
+        //     self.fs.clone(),
+        //     self.block_device.clone(),
+        // );
+        // info!("remove5");
+        //target_inode.clear();
+
+        info!("remove6");
+        // 释放inode资源
+        fs.dealloc_inode(inode_id);
+        block_cache_sync_all();
+        true
+    }
+
     /// List inodes under current inode
     pub fn ls(&self) -> Vec<String> {
         let _fs = self.fs.lock();
@@ -172,7 +286,9 @@ impl Inode {
     }
     /// Clear the data in current inode
     pub fn clear(&self) {
+        info!("clear1");
         let mut fs = self.fs.lock();
+        info!("clear2");
         self.modify_disk_inode(|disk_inode| {
             let size = disk_inode.size;
             let data_blocks_dealloc = disk_inode.clear_size(&self.block_device);
@@ -181,6 +297,8 @@ impl Inode {
                 fs.dealloc_data(data_block);
             }
         });
+        info!("clear3");
         block_cache_sync_all();
+        info!("clear4");
     }
 }
