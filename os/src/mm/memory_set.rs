@@ -60,6 +60,38 @@ impl MemorySet {
             None,
         );
     }
+    /// Assume that no conflicts.
+    pub fn overlap_with(&mut self, start: usize, end: usize) -> bool {
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(end);
+       
+        if let Some((_idx, _area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, _area)| (_area.vpn_range.get_start() <= start_va.floor() && start_va.floor() < _area.vpn_range.get_end()) 
+                            || (_area.vpn_range.get_start() >= start_va.floor() && end_va.ceil() > _area.vpn_range.get_start()))
+        {
+            return true;
+        }
+        false
+    }
+    ///
+    pub fn contain(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        // info!("contain {} {}", start_va.0, end_va.0);
+        // for area in self.areas.iter() {
+        //     info!("area {} {}", area.vpn_range.get_start().0, area.vpn_range.get_end().0);
+        // }
+        if let Some((_idx, _area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, _area)| _area.vpn_range.get_start() == start_va.floor() && _area.vpn_range.get_end() == end_va.ceil())
+        {
+            return true;
+        }
+        false
+    }
     /// remove a area
     pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
         if let Some((idx, area)) = self

@@ -5,12 +5,13 @@
 //! and the replacement and transfer of control flow of different applications are executed.
 
 use super::__switch;
-use super::{fetch_task, TaskStatus};
+use super::{TaskStatus, fetch_task}; //find_min_stride_task //
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
+use crate::mm::MapPermission;
 
 /// Processor management structure
 pub struct Processor {
@@ -50,12 +51,16 @@ lazy_static! {
     pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
 }
 
+
+
 ///The main part of process execution and scheduling
 ///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
 pub fn run_tasks() {
     loop {
         let mut processor = PROCESSOR.exclusive_access();
+        //if let Some(task) = find_min_stride_task() {
         if let Some(task) = fetch_task() {
+            //info!("run_tasks:pid[{}]", task.pid.0);
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -90,6 +95,19 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();
     task.get_user_token()
+}
+
+/// Map a virtual address to physical address in current task
+pub fn mmap(start: usize, len: usize, perm: MapPermission) -> isize
+{
+    let task = current_task().unwrap();
+    task.mmap(start, len, perm)
+}
+/// Unmap a virtual address in current task
+pub fn munmap(start: usize, len: usize) -> isize
+{
+    let task = current_task().unwrap();
+    task.munmap(start, len)
 }
 
 ///Get the mutable reference to trap context of current task

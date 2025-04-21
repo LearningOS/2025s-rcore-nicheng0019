@@ -33,8 +33,10 @@ pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use manager::add_task;
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
-    Processor,
+    Processor, mmap,munmap
 };
+/// The maximum stride of a task.
+pub const BIG_STRIDE: usize = 0x10000000;
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
@@ -45,9 +47,10 @@ pub fn suspend_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
     // Change status to Ready
     task_inner.task_status = TaskStatus::Ready;
+    task_inner.stride = task_inner.stride.wrapping_add(task_inner.pass);
     drop(task_inner);
     // ---- release current PCB
-
+    
     // push back to ready queue.
     add_task(task);
     // jump to scheduling cycle
